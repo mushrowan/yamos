@@ -240,20 +240,15 @@ pub struct AuthorizationServerMetadata {
 /// Tells clients what auth methods we support
 pub async fn metadata_handler(State(state): State<OAuthAppState>) -> Response {
     let base_url = &state.base_url;
-    // supports both authorization_code (with PKCE) and client_credentials
+    // advertise authorization_code with PKCE (public clients)
+    // client_credentials is still supported but not advertised to avoid confusion
     let metadata = AuthorizationServerMetadata {
         issuer: base_url.clone(),
         authorization_endpoint: Some(format!("{}/authorize", base_url)),
         token_endpoint: format!("{}/token", base_url),
         registration_endpoint: Some(format!("{}/register", base_url)),
-        grant_types_supported: vec![
-            "authorization_code".to_string(),
-            "client_credentials".to_string(),
-        ],
-        token_endpoint_auth_methods_supported: vec![
-            "client_secret_post".to_string(),
-            "none".to_string(), // For public clients with PKCE
-        ],
+        grant_types_supported: vec!["authorization_code".to_string()],
+        token_endpoint_auth_methods_supported: vec!["none".to_string()],
         response_types_supported: vec!["code".to_string()],
         code_challenge_methods_supported: Some(vec!["S256".to_string()]),
     };
