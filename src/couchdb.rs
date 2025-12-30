@@ -324,20 +324,10 @@ impl CouchDbClient {
         Ok(())
     }
 
-    /// splits content into chunks, saves them, then saves the main doc pointing to them
     pub async fn save_note(&self, id: &str, content: &str) -> Result<SaveResponse> {
-        // try to get existing doc first to get the _rev
         let existing = self.get_note(id).await.ok();
         let now = Self::now_ms();
 
-        // delete old chunks to avoid orphaning them
-        if let Some(ref old_doc) = existing {
-            for old_chunk_id in &old_doc.children {
-                let _ = self.delete_leaf(old_chunk_id).await;
-            }
-        }
-
-        // split content into chunks
         let chunks = Self::split_into_chunks(content);
         let chunk_ids: Vec<String> = chunks.iter().map(|(id, _)| id.clone()).collect();
 
@@ -348,18 +338,17 @@ impl CouchDbClient {
             content.len()
         );
 
-        // save all chunk documents first
+        // save new chunks first
         for (chunk_id, chunk_data) in &chunks {
             self.save_leaf(chunk_id, chunk_data).await?;
             tracing::debug!("Saved chunk {} ({} bytes)", chunk_id, chunk_data.len());
         }
 
-        // create the main document with children references
         let doc = NoteDoc {
             id: id.to_string(),
             rev: existing.as_ref().and_then(|d| d.rev.clone()),
             path: id.to_string(),
-            data: String::new(), // No direct data for "plain" type
+            data: String::new(),
             ctime: existing.as_ref().map(|d| d.ctime).unwrap_or(now),
             mtime: now,
             size: content.len() as u64,
@@ -391,6 +380,15 @@ impl CouchDbClient {
         }
 
         let save_response: SaveResponse = response.json().await?;
+
+        // only delete old chunks AFTER parent doc is saved successfully
+        // (orphaned chunks are better than dangling references)
+        if let Some(ref old_doc) = existing {
+            for old_chunk_id in &old_doc.children {
+                let _ = self.delete_leaf(old_chunk_id).await;
+            }
+        }
+
         tracing::info!(
             "Successfully saved note {} with {} chunks",
             id,
