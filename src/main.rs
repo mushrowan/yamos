@@ -77,6 +77,14 @@ struct Args {
     /// If not set, defaults to http://HOST:PORT
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+
+    /// Rate limit: requests per second per IP
+    #[arg(long, env = "RATE_LIMIT_PER_SECOND", default_value = "10")]
+    rate_limit_per_second: u64,
+
+    /// Rate limit: burst size (max requests before limiting kicks in)
+    #[arg(long, env = "RATE_LIMIT_BURST", default_value = "100")]
+    rate_limit_burst: u32,
 }
 
 #[tokio::main]
@@ -127,6 +135,11 @@ async fn main() -> Result<()> {
 
             let auth_mode = determine_auth_mode(&args)?;
 
+            let rate_limit = RateLimitConfig {
+                per_second: args.rate_limit_per_second,
+                burst: args.rate_limit_burst,
+            };
+
             match auth_mode {
                 AuthMode::OAuth(config) => {
                     tracing::info!("OAuth 2.0 authentication enabled");
@@ -136,6 +149,7 @@ async fn main() -> Result<()> {
                         args.port,
                         config,
                         args.public_url.as_deref(),
+                        &rate_limit,
                     )
                     .await?;
                 }
@@ -143,13 +157,14 @@ async fn main() -> Result<()> {
                     tracing::info!(
                         "Bearer token authentication enabled (consider migrating to OAuth)"
                     );
-                    run_sse_server_legacy(server, &args.host, args.port, token).await?;
+                    run_sse_server_legacy(server, &args.host, args.port, token, &rate_limit)
+                        .await?;
                 }
                 AuthMode::None => {
                     tracing::warn!(
                         "WARNING: No authentication enabled. Server is publicly accessible!"
                     );
-                    run_sse_server_no_auth(server, &args.host, args.port).await?;
+                    run_sse_server_no_auth(server, &args.host, args.port, &rate_limit).await?;
                 }
             }
         }
@@ -162,6 +177,11 @@ enum AuthMode {
     OAuth(auth::AuthConfig),
     Legacy(String),
     None,
+}
+
+struct RateLimitConfig {
+    per_second: u64,
+    burst: u32,
 }
 
 fn determine_auth_mode(args: &Args) -> Result<AuthMode> {
@@ -204,6 +224,7 @@ async fn run_sse_server_with_oauth(
     port: u16,
     config: auth::AuthConfig,
     public_url: Option<&str>,
+    rate_limit: &RateLimitConfig,
 ) -> Result<()> {
     use axum::{
         middleware,
@@ -264,26 +285,31 @@ async fn run_sse_server_with_oauth(
         base_url: base_url.clone(),
     };
 
-    // Rate limiting: 10 requests per second per IP, burst of 30
+    // Rate limiting - configurable via RATE_LIMIT_PER_SECOND and RATE_LIMIT_BURST
     // SmartIpKeyExtractor checks x-forwarded-for and friends before falling back to peer ip,
     // so this works both behind cloudflare/nginx/whatever and when running locally
+    tracing::info!(
+        "Rate limiting: {} req/sec, burst size {}",
+        rate_limit.per_second,
+        rate_limit.burst
+    );
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
-            .per_second(10)
-            .burst_size(30)
+            .per_second(rate_limit.per_second)
+            .burst_size(rate_limit.burst)
             .finish()
             .expect("Failed to build rate limiter config"),
     );
     let governor_limiter = governor_conf.limiter().clone();
     let rate_limit_layer = GovernorLayer::new(governor_conf);
 
-    // Stricter rate limiting for auth endpoints: 5 requests per second, burst of 10
+    // Stricter rate limiting for auth endpoints: half the normal rate
     let auth_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
-            .per_second(5)
-            .burst_size(10)
+            .per_second(rate_limit.per_second / 2)
+            .burst_size(rate_limit.burst / 3)
             .finish()
             .expect("Failed to build auth rate limiter config"),
     );
@@ -360,6 +386,7 @@ async fn run_sse_server_legacy(
     host: &str,
     port: u16,
     token: String,
+    rate_limit: &RateLimitConfig,
 ) -> Result<()> {
     use axum::{middleware, Router};
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -374,13 +401,17 @@ async fn run_sse_server_legacy(
     let bind_addr = format!("{}:{}", host, port);
 
     tracing::info!("MCP server listening on http://{}", bind_addr);
+    tracing::info!(
+        "Rate limiting: {} req/sec, burst size {}",
+        rate_limit.per_second,
+        rate_limit.burst
+    );
 
-    // Rate limiting: 10 requests per second per IP, burst of 30
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
-            .per_second(10)
-            .burst_size(30)
+            .per_second(rate_limit.per_second)
+            .burst_size(rate_limit.burst)
             .finish()
             .expect("Failed to build rate limiter config"),
     );
@@ -414,7 +445,12 @@ async fn run_sse_server_legacy(
     Ok(())
 }
 
-async fn run_sse_server_no_auth(server: YamosServer, host: &str, port: u16) -> Result<()> {
+async fn run_sse_server_no_auth(
+    server: YamosServer,
+    host: &str,
+    port: u16,
+    rate_limit: &RateLimitConfig,
+) -> Result<()> {
     use axum::Router;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::tower::{
@@ -428,13 +464,17 @@ async fn run_sse_server_no_auth(server: YamosServer, host: &str, port: u16) -> R
     let bind_addr = format!("{}:{}", host, port);
 
     tracing::info!("MCP server listening on http://{}", bind_addr);
+    tracing::info!(
+        "Rate limiting: {} req/sec, burst size {}",
+        rate_limit.per_second,
+        rate_limit.burst
+    );
 
-    // Rate limiting: 10 requests per second per IP, burst of 30
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
-            .per_second(10)
-            .burst_size(30)
+            .per_second(rate_limit.per_second)
+            .burst_size(rate_limit.burst)
             .finish()
             .expect("Failed to build rate limiter config"),
     );
