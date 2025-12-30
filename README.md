@@ -53,6 +53,14 @@ than that)
   - there are other obsidian mcp servers which were purpose-built for this - if
     you'll be doing this exclusively i'd recommend using one of those instead.
 
+## todo
+
+- batch operations - currently everything has to be done one-note at a time
+  (apart from listing notes)
+- find some loser out there to do a proper security audit
+- nix module :)
+- cargo crate :)
+
 ## what you'll need
 
 so before you get started, here's what you gotta have set up:
@@ -89,133 +97,11 @@ cd /opt/yamos
 ./yamos --transport stdio
 ```
 
-test, make sure you can talk to the server from your ai guy, test a couple of
-the tools in a chat, and then configure a service or whatever your preferred
-method of daemonising is to run it persistently!
+then head over to claude.ai → settings → connectors → add custom connector, put
+in your url and oauth credentials, and you're golden!
 
-## configuration options
-
-you can configure everything either through command line flags or environment
-variables (i just stick everything in a `.env` file personally):
-
-| cli flag             | env variable       | what it does                                     | default value              |
-| -------------------- | ------------------ | ------------------------------------------------ | -------------------------- |
-| `--transport`        | `MCP_TRANSPORT`    | transport mode: `sse` or `stdio`                 | `sse`                      |
-| `--host`             | `MCP_HOST`         | host to bind to (sse mode)                       | `localhost`                |
-| `--port`             | `MCP_PORT`         | port to listen on (sse mode)                     | `3000`                     |
-| `--auth-token`       | `MCP_AUTH_TOKEN`   | auth token for sse mode (recommended)            | none (but you want one)    |
-| `--couchdb-url`      | `COUCHDB_URL`      | your couchdb url                                 | `http://localhost:5984`    |
-| `--couchdb-database` | `COUCHDB_DATABASE` | database name                                    | `obsidian`                 |
-| `--couchdb-user`     | `COUCHDB_USER`     | couchdb username                                 | required                   |
-| `--couchdb-password` | `COUCHDB_PASSWORD` | couchdb password                                 | required                   |
-| `--public-url`       | `PUBLIC_URL`       | tells the client where to find various endpoints | none (but probably needed) |
-
-## authentication
-
-yamos supports two authentication modes for sse:
-
-### oauth 2.0 (recommended!)
-
-oauth 2.0 with jwt tokens - this is what you want for production use! it's more
-secure than static tokens and works great with claude.ai.
-
-**setup:**
-
-1. generate your secrets:
-
-```bash
-# jwt secret (used to sign tokens)
-openssl rand -hex 64
-
-# client secret
-openssl rand -hex 32
-```
-
-2. add to your `.env`:
-
-```bash
-OAUTH_ENABLED=true
-OAUTH_JWT_SECRET=your-generated-jwt-secret
-OAUTH_CLIENT_ID=mcp-client # not particularly important, set it to whatever
-OAUTH_CLIENT_SECRET=your-generated-client-secret
-OAUTH_TOKEN_EXPIRATION=3600  # 1 hour, or 0 for no expiration
-```
-
-see .env.example for a more comprehensive example
-
-### legacy bearer token ("deprecated" - not that anyone had a chance to start using it)
-
-simple static bearer token - easier to set up but less secure. only use this if
-your ai of choice doesn't support oauth (who doesn't support oauth. it's current
-year current month current day. get with the program)
-
-```bash
-OAUTH_ENABLED=false
-MCP_AUTH_TOKEN=your-static-token-here
-```
-
-**note:** if you set `OAUTH_ENABLED=false` (or don't set it at all), it'll use
-this mode. but seriously, use oauth if you can
-
-### step 2: expose it to the internet
-
-claude's servers need to be able to reach your mcp server, so you gotta expose
-it somehow. here are some options:
-
-- **public ip + reverse proxy**: like caddy or nginx
-- **cloudflare tunnel**: super easy, no ports to open
-- **tailscale funnel**: similar to cloudflare tunnel and it rhymes with it too
-
-here's an example caddy config if you're going that route:
-
-```caddy
-mcp.yourdomain.com {
-    reverse_proxy :3000
-}
-```
-
-### step 3: connect it to claude.ai
-
-head over to claude.ai, go to settings → connectors → add custom connector
-
-- **name**: whatever you want the connector to be called
-- **url**: https://whatever.your.url.is.yippee.tld
-- _advanced settings_:
-  - oauth client id: your-oauth-client-id
-  - **oauth client secret**: your-oauth-client-secret
-
-and that's it!! now you can be walking down the street, open claude on your
-phone and be like "hey add milk to my shopping list" and boom, it's in your
-obsidian vault!
-
-## using it with claude desktop (stdio mode)
-
-if you want to use this with claude desktop on your computer, just add it to
-your claude desktop config file at
-`~/.config/claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "command": "/path/to/yamos",
-      "args": ["--transport", "stdio"],
-      "env": {
-        "COUCHDB_URL": "https://your-server.com/couchdb",
-        "COUCHDB_DATABASE": "obsidian",
-        "COUCHDB_USER": "admin",
-        "COUCHDB_PASSWORD": "your-password"
-      }
-    }
-  }
-}
-```
-
-note: you don't need an auth token for stdio mode since it's running locally as
-a subprocess!
-
-another note: i dont really use this functionality. it's probably buggy as it
-hasnt been tested much (soz)
+**for the full setup guide** (oauth config, claude desktop, troubleshooting,
+etc): **[SETUP.md](SETUP.md)**
 
 ## ERM HOW DOES THE THING DO THE DO?
 
@@ -259,25 +145,6 @@ each chunk is a separate document:
   "type": "leaf"
 }
 ```
-
-## http endpoints (sse mode)
-
-**mcp endpoints:**
-
-- `POST /` - streamable http endpoint for mcp protocol
-  - from the spec docs, i couldn't really figure out whether this was expected
-    to be / or /mcp or /sse. if anyone else can figure it out please let me know
-  - i considered just making this endpoint the fallback, but that feels a little
-    odd. but who knows, maybe that's normal
-
-**oauth endpoints:**
-
-- `GET /.well-known/oauth-protected-resource` - resource metadata (RFC 9728)
-- `GET /.well-known/oauth-authorization-server` - auth server metadata
-  (RFC 8414)
-- `GET /authorize` - authorization endpoint (shows consent page)
-- `POST /token` - token endpoint
-- `POST /register` - dynamic client registration (RFC 7591)
 
 ## current limitations - ping me if you're desperate for me to unlimitationify it
 
