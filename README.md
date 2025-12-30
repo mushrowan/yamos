@@ -44,6 +44,17 @@ than that)
 - **append_to_note** - append content to existing notes (perfect for todos!)
 - **delete_note** - remove notes from your vault
 
+- **batch_read_notes** - read a bunch of notes in one go
+- **batch_write_notes** - create/update multiple notes at once
+- **batch_delete_notes** - nuke several notes
+- **batch_append_to_notes** - append to multiple notes (why? because what if i
+  need to add "- your mum" to "list of lovely women" and "done that" all at
+  once)
+
+all batch operations use partial success - if one note fails (bad path, doesn't
+exist, whatever), the others still go through. the error comes through in the
+json report to your litle ai guy
+
 ### modes
 
 - **sse mode** (default): run as a web service for **claude.ai** - talk to
@@ -55,8 +66,6 @@ than that)
 
 ## todo
 
-- batch operations - currently everything has to be done one-note at a time
-  (apart from listing notes)
 - find some loser out there to do a proper security audit
 - nix module :)
 - cargo crate :)

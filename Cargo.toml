@@ -1,6 +1,6 @@
 [package]
 name = "yamos"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "yet another mcp obsidian server, for obsidian livesync via couchdb"
 license = "MIT"
