@@ -1,6 +1,6 @@
 # yamos - yet another mcp obsidian server
 
-![yamos helping haiku to append to a note](assets/append.gif)
+![yamos helping haiku](assets/demo.gif)
 
 you want your little ai agent dude to look at your obsidian vault. your musings.
 your Ponderings. but other mcp servers only work locally, and your little ai
