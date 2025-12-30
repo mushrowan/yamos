@@ -7,6 +7,28 @@ use rmcp::{
 use serde::Deserialize;
 use std::borrow::Cow;
 
+/// Validate a note path to prevent path traversal and ensure it's a valid Obsidian note path.
+fn validate_note_path(path: &str) -> Result<(), McpError> {
+    let check = |cond: bool, msg: &str| if cond { Err(mcp_error(msg)) } else { Ok(()) };
+
+    check(path.is_empty(), "Note path cannot be empty")?;
+    check(!path.ends_with(".md"), "Note path must end with .md")?;
+    check(path.contains(".."), "Note path cannot contain '..'")?;
+    check(path.starts_with('/'), "Note path cannot start with '/'")?;
+    check(path.contains('\0'), "Note path cannot contain null bytes")?;
+
+    // Allowed: alphanumeric, space, hyphen, underscore, dot, slash, parentheses
+    let invalid_char = path
+        .chars()
+        .find(|c| !c.is_alphanumeric() && !" -_./()'".contains(*c));
+
+    if let Some(c) = invalid_char {
+        return Err(mcp_error(format!("Note path contains invalid character: '{c}'")));
+    }
+
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct YamosServer {
     db: CouchDbClient,
@@ -95,6 +117,8 @@ impl YamosServer {
         &self,
         Parameters(req): Parameters<ReadNoteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        validate_note_path(&req.path)?;
+
         let doc = self
             .db
             .get_note(&req.path)
@@ -115,6 +139,8 @@ impl YamosServer {
         &self,
         Parameters(req): Parameters<WriteNoteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        validate_note_path(&req.path)?;
+
         self.db
             .save_note(&req.path, &req.content)
             .await
@@ -131,6 +157,8 @@ impl YamosServer {
         &self,
         Parameters(req): Parameters<AppendNoteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        validate_note_path(&req.path)?;
+
         self.db
             .append_to_note(&req.path, &req.content)
             .await
@@ -147,6 +175,8 @@ impl YamosServer {
         &self,
         Parameters(req): Parameters<DeleteNoteRequest>,
     ) -> Result<CallToolResult, McpError> {
+        validate_note_path(&req.path)?;
+
         self.db
             .delete_note(&req.path)
             .await
