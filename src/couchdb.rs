@@ -66,8 +66,9 @@ pub struct AllDocsRow {
     pub id: String,
     pub key: String,
     pub value: AllDocsValue,
+    // can be NoteDoc or LeafDoc, so we use Value and parse later
     #[serde(default)]
-    pub doc: Option<NoteDoc>,
+    pub doc: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,10 +104,10 @@ impl CouchDbClient {
         format!("{}/{}/{}", self.base_url, self.database, urlencode(doc_id))
     }
 
-    /// lists notes, filtering out chunks (h:*) and system docs (_*)
+    /// lists notes, filtering out chunks (h:*), system docs (_*), and soft-deleted notes
     pub async fn list_notes(&self) -> Result<Vec<String>> {
         let url = format!(
-            "{}/{}/_all_docs?include_docs=false",
+            "{}/{}/_all_docs?include_docs=true",
             self.base_url, self.database
         );
 
@@ -125,12 +126,15 @@ impl CouchDbClient {
 
         let all_docs: AllDocsResponse = response.json().await?;
 
-        // filter out chunk documents (starting with "h:") and system docs
+        // filter out chunk documents (h:*), system docs (_*), tombstones, and soft-deleted
         let notes: Vec<String> = all_docs
             .rows
             .into_iter()
             .filter(|row| {
-                !row.id.starts_with("h:") && !row.id.starts_with("_") && !row.value.deleted
+                !row.id.starts_with("h:")
+                    && !row.id.starts_with("_")
+                    && !row.value.deleted
+                    && !row.doc.as_ref().is_some_and(|d| d.get("deleted") == Some(&serde_json::Value::Bool(true)))
             })
             .map(|row| row.id)
             .collect();
@@ -226,19 +230,24 @@ impl CouchDbClient {
     }
 
     fn split_into_chunks(content: &str) -> Vec<(String, String)> {
-        let bytes = content.as_bytes();
         let mut chunks = Vec::new();
+        let mut current_chunk = String::new();
+        let mut current_size = 0;
 
-        for chunk_data in bytes.chunks(CHUNK_SIZE) {
-            let chunk_id = Self::generate_chunk_id();
-            // convert chunk bytes back to string (handling UTF-8 boundaries)
-            let chunk_str = String::from_utf8_lossy(chunk_data).to_string();
-            chunks.push((chunk_id, chunk_str));
+        // split on character boundaries to avoid corrupting multi-byte UTF-8
+        for ch in content.chars() {
+            let ch_len = ch.len_utf8();
+            if current_size + ch_len > CHUNK_SIZE && !current_chunk.is_empty() {
+                chunks.push((Self::generate_chunk_id(), current_chunk));
+                current_chunk = String::new();
+                current_size = 0;
+            }
+            current_chunk.push(ch);
+            current_size += ch_len;
         }
 
-        // edge/goon case: empty content should have at least one empty chunk
-        if chunks.is_empty() {
-            chunks.push((Self::generate_chunk_id(), String::new()));
+        if !current_chunk.is_empty() || chunks.is_empty() {
+            chunks.push((Self::generate_chunk_id(), current_chunk));
         }
 
         chunks
@@ -277,11 +286,56 @@ impl CouchDbClient {
         Ok(())
     }
 
+    async fn delete_leaf(&self, chunk_id: &str) -> Result<()> {
+        let url = self.doc_url(chunk_id);
+
+        // get current rev first
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            // already gone or never existed, that's fine
+            return Ok(());
+        }
+
+        let leaf: LeafDoc = response.json().await?;
+        let Some(rev) = leaf.rev else {
+            return Ok(());
+        };
+
+        let delete_url = format!("{}?rev={}", url, urlencode(&rev));
+        let response = self
+            .client
+            .delete(&delete_url)
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!("Failed to delete chunk {}: {} - {}", chunk_id, status, body);
+        }
+
+        Ok(())
+    }
+
     /// splits content into chunks, saves them, then saves the main doc pointing to them
     pub async fn save_note(&self, id: &str, content: &str) -> Result<SaveResponse> {
         // try to get existing doc first to get the _rev
         let existing = self.get_note(id).await.ok();
         let now = Self::now_ms();
+
+        // delete old chunks to avoid orphaning them
+        if let Some(ref old_doc) = existing {
+            for old_chunk_id in &old_doc.children {
+                let _ = self.delete_leaf(old_chunk_id).await;
+            }
+        }
 
         // split content into chunks
         let chunks = Self::split_into_chunks(content);
@@ -352,18 +406,32 @@ impl CouchDbClient {
         self.save_note(id, &new_content).await
     }
 
+    /// soft-deletes a note by setting deleted: true (livesync expects this, not couchDB tombstones)
     pub async fn delete_note(&self, id: &str) -> Result<()> {
         let existing = self.get_note(id).await?;
-        let rev = existing
-            .rev
-            .ok_or_else(|| anyhow!("No revision found for note"))?;
 
-        let url = format!("{}?rev={}", self.doc_url(id), rev);
+        let doc = NoteDoc {
+            id: existing.id,
+            rev: existing.rev,
+            path: existing.path,
+            data: existing.data,
+            ctime: existing.ctime,
+            mtime: Self::now_ms(),
+            size: existing.size,
+            doc_type: existing.doc_type,
+            children: existing.children,
+            deleted: Some(true),
+            eden: existing.eden,
+        };
+
+        let url = self.doc_url(id);
 
         let response = self
             .client
-            .delete(&url)
+            .put(&url)
             .header("Authorization", &self.auth_header)
+            .header("Content-Type", "application/json")
+            .json(&doc)
             .send()
             .await?;
 
@@ -373,6 +441,7 @@ impl CouchDbClient {
             return Err(anyhow!("Failed to delete note: {} - {}", status, body));
         }
 
+        tracing::info!("Soft-deleted note {}", id);
         Ok(())
     }
 
