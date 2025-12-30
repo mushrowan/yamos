@@ -269,7 +269,7 @@ impl YamosServer {
     }
 
     #[tool(
-        description = "Insert content at a specific line in a note. Line numbers are 1-indexed - content is inserted before the specified line. Use line 1 to insert at the start, or a line past the end to append."
+        description = "Insert content at a specific line in a note. Line numbers are 1-indexed - content is inserted before the specified line. Use line 1 to insert at the start, or a line past the end to append. Note that subsequent inserts and deletes will need to take into account that later line indices will have changed."
     )]
     async fn insert_lines(
         &self,
@@ -296,7 +296,7 @@ impl YamosServer {
     // TODO: implement a "safe_delete_lines" that requires that the exact text to be deleted is
     // also specified
     #[tool(
-        description = "Delete a range of lines from a note. Line numbers are 1-indexed and inclusive on both ends."
+        description = "Delete a range of lines from a note. Line numbers are 1-indexed and inclusive on both ends. Note that subsequent inserts and deletes will need to take into account that later line indices will have changed."
     )]
     async fn delete_lines(
         &self,
