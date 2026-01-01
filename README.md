@@ -69,7 +69,6 @@ json report to your litle ai guy
 ## todo
 
 - find some loser out there to do a proper security audit
-- nix module :)
 - cargo crate :)
 - handle encrypted vaults
 - support binary attachments (images and whatnot)
