@@ -174,7 +174,7 @@ the flake.nix in this repo exposes a module you can add as your own flake input:
 {
   inputs = {
     yamos = {
-      url = "github:mushrowan/yamos/dev";
+      url = "github:mushrowan/yamos";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

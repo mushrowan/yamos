@@ -75,7 +75,7 @@ so before you get started, here's what you gotta have set up:
 
 ## this sounds cool!!! how do i make it work
 
-- [install and configure it](SETUP.MD)
+- [install and configure it](./SETUP.MD)
 - connect your ai to it (e.g. ,
   - claude: claude.ai → settings → connectors → add custom connector, put in
     your url and oauth credentials **for the full setup guide** (oauth config)
