@@ -78,7 +78,7 @@ so before you get started, here's what you gotta have set up:
 - [install and configure it](https://github.com/mushrowan/yamos/blob/main/SETUP.md)
 - connect your ai to it (e.g. ,
   - claude: claude.ai → settings → connectors → add custom connector, put in
-    your url and oauth credentials **for the full setup guide** (oauth config)
+    your url and oauth credentials (oauth config)
 - "hey ai could you use yamos to list my notes"
 
 ## ERM HOW DOES IT WORK
