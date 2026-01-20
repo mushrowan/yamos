@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 # MCP SDK - with both stdio and SSE transport support
 # I enabled a buncha feature flags that may or may not be needed. Probably need to go through and get rid of some of them at some point
-rmcp = { version = "0.12", features = ["server", "client", "transport-io", "transport-streamable-http-client", "macros", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+rmcp = { version = "0.13", features = ["server", "client", "transport-io", "transport-streamable-http-client", "macros", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
 
 axum = "0.8"
 tower = "0.5"
