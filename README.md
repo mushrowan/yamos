@@ -59,9 +59,6 @@ json report to your litle ai guy
 - cargo crate :)
 - handle encrypted vaults
 - support binary attachments (images and whatnot)
-- ?- persist credentials? dynamic client registration doesn't persist -
-  credentials are generated but not stored anywhere, so they won't survive a
-  server restart. but maybe this is good
 
 ## what you'll need
 

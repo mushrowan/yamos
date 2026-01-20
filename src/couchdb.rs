@@ -17,8 +17,6 @@ pub struct CouchDbClient {
     auth_header: String,
 }
 
-// i tried to get "notes" working but it kept corrupting my database. i've left it in, in case
-// a future version of me can figure out what is the dealio with it
 /// Main document for a note - references chunks via children array
 /// type "plain" = chunked text, "newnote" = chunked binary, "notes" = legacy (avoid)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +331,18 @@ impl CouchDbClient {
 
     pub async fn save_note(&self, id: &str, content: &str) -> Result<SaveResponse> {
         let existing = self.get_note(id).await.ok();
+        self.save_note_internal(id, content, existing).await
+    }
+
+    /// Internal save that accepts a pre-fetched existing document.
+    /// This avoids a race condition where the document changes between
+    /// when content was read and when we try to save.
+    async fn save_note_internal(
+        &self,
+        id: &str,
+        content: &str,
+        existing: Option<NoteDoc>,
+    ) -> Result<SaveResponse> {
         let now = Self::now_ms();
 
         let chunks = Self::split_into_chunks(content);
@@ -408,7 +418,8 @@ impl CouchDbClient {
         let existing = self.get_note(id).await?;
         let current_content = self.decode_content(&existing).await?;
         let new_content = format!("{}\n{}", current_content, content);
-        self.save_note(id, &new_content).await
+        self.save_note_internal(id, &new_content, Some(existing))
+            .await
     }
 
     pub async fn insert_lines(&self, id: &str, line: usize, content: &str) -> Result<SaveResponse> {
@@ -427,7 +438,8 @@ impl CouchDbClient {
         }
 
         let new_content = lines.join("\n");
-        self.save_note(id, &new_content).await
+        self.save_note_internal(id, &new_content, Some(existing))
+            .await
     }
 
     pub async fn delete_lines(
@@ -461,7 +473,8 @@ impl CouchDbClient {
             .collect();
 
         let new_content = new_lines.join("\n");
-        self.save_note(id, &new_content).await
+        self.save_note_internal(id, &new_content, Some(existing))
+            .await
     }
 
     /// soft-deletes a note by setting deleted: true (livesync expects this, not couchDB tombstones)
