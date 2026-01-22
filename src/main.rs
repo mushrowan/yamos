@@ -57,9 +57,21 @@ struct Args {
     #[arg(long, env = "OAUTH_JWT_SECRET")]
     oauth_jwt_secret: Option<String>,
 
-    /// Token expiration in seconds (0 = no expiration)
+    /// Access token expiration in seconds (0 = no expiration)
     #[arg(long, env = "OAUTH_TOKEN_EXPIRATION", default_value = "3600")]
     oauth_token_expiration: u64,
+
+    /// Refresh token expiration in seconds (default 30 days)
+    #[arg(
+        long,
+        env = "OAUTH_REFRESH_TOKEN_EXPIRATION",
+        default_value = "2592000"
+    )]
+    oauth_refresh_token_expiration: u64,
+
+    /// Strict rotation: invalidate token family on refresh token reuse (default: just log)
+    #[arg(long, env = "OAUTH_STRICT_ROTATION", default_value = "false")]
+    oauth_strict_rotation: bool,
 
     /// OAuth client ID
     #[arg(long, env = "OAUTH_CLIENT_ID")]
@@ -231,6 +243,10 @@ fn determine_auth_mode(args: &Args) -> Result<AuthMode> {
             } else {
                 Some(std::time::Duration::from_secs(args.oauth_token_expiration))
             },
+            refresh_token_expiration: std::time::Duration::from_secs(
+                args.oauth_refresh_token_expiration,
+            ),
+            strict_rotation: args.oauth_strict_rotation,
         }))
     } else if let Some(token) = &args.auth_token {
         Ok(AuthMode::Legacy(token.clone()))
@@ -294,12 +310,14 @@ async fn run_sse_server_with_oauth(
 
     let oauth_service = Arc::new(auth::OAuthService::new(config));
     let auth_store = Arc::new(auth::AuthorizationStore::new());
+    let refresh_token_store = Arc::new(auth::RefreshTokenStore::new());
     let client_registry = Arc::new(auth::ClientRegistry::new());
 
     // Combined OAuth state for all handlers
     let oauth_state = auth::OAuthAppState {
         oauth_service: oauth_service.clone(),
         auth_store: auth_store.clone(),
+        refresh_token_store: refresh_token_store.clone(),
         client_registry: client_registry.clone(),
         base_url: base_url.clone(),
     };
@@ -363,6 +381,17 @@ async fn run_sse_server_with_oauth(
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 limiter.retain_recent();
+            }
+        }
+    });
+
+    // Start background task to clean up expired refresh tokens
+    tokio::spawn({
+        let store = refresh_token_store.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await; // every 5 mins
+                store.cleanup_expired().await;
             }
         }
     });

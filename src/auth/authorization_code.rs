@@ -226,6 +226,244 @@ impl AuthorizationStore {
     }
 }
 
+// ============================================================================
+// Refresh Token Storage (with rotation support)
+// ============================================================================
+
+/// max refresh tokens before we start evicting old ones
+const MAX_REFRESH_TOKENS: usize = 10000;
+
+/// grace period after rotation where old token still works (handles retries)
+const ROTATION_GRACE_PERIOD_SECS: u64 = 30;
+
+/// stores refresh tokens with rotation tracking
+#[derive(Clone, Default)]
+pub struct RefreshTokenStore {
+    /// token_id -> RefreshTokenEntry
+    tokens: Arc<RwLock<HashMap<String, RefreshTokenEntry>>>,
+    /// family_id -> list of token_ids in this family (for invalidation)
+    families: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// track insertion order for LRU eviction
+    insertion_order: Arc<RwLock<VecDeque<String>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RefreshTokenEntry {
+    /// groups tokens from the same authorisation session
+    pub family_id: String,
+    /// the client this token belongs to
+    pub client_id: String,
+    /// when the token was created
+    #[allow(dead_code)]
+    pub created_at: std::time::Instant,
+    /// when the token expires
+    pub expires_at: std::time::Instant,
+    /// set when token is used/rotated (for grace period)
+    pub rotated_at: Option<std::time::Instant>,
+    /// the token that replaced this one after rotation
+    pub superseded_by: Option<String>,
+}
+
+/// result of validating a refresh token
+#[derive(Debug)]
+pub enum RefreshTokenValidation {
+    /// token is valid, here's the entry
+    Valid(RefreshTokenEntry),
+    /// token was rotated but still within grace period, here's the new token id
+    GracePeriod {
+        new_token_id: String,
+        entry: RefreshTokenEntry,
+    },
+    /// token was reused after rotation (potential theft)
+    Reused { family_id: String },
+    /// token not found
+    NotFound,
+    /// token has expired
+    Expired,
+}
+
+impl RefreshTokenStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// store a new refresh token
+    pub async fn store(
+        &self,
+        token_id: String,
+        family_id: String,
+        client_id: String,
+        expires_in: std::time::Duration,
+    ) {
+        let mut tokens = self.tokens.write().await;
+        let mut families = self.families.write().await;
+        let mut order = self.insertion_order.write().await;
+
+        // evict oldest entries if at capacity
+        while tokens.len() >= MAX_REFRESH_TOKENS {
+            if let Some(oldest_id) = order.pop_front() {
+                if let Some(entry) = tokens.remove(&oldest_id) {
+                    // also remove from family tracking
+                    if let Some(family) = families.get_mut(&entry.family_id) {
+                        family.retain(|id| id != &oldest_id);
+                        if family.is_empty() {
+                            families.remove(&entry.family_id);
+                        }
+                    }
+                }
+                tracing::debug!(
+                    "evicted oldest refresh token due to capacity limit: {}",
+                    oldest_id
+                );
+            } else {
+                break;
+            }
+        }
+
+        let now = std::time::Instant::now();
+        let entry = RefreshTokenEntry {
+            family_id: family_id.clone(),
+            client_id,
+            created_at: now,
+            expires_at: now + expires_in,
+            rotated_at: None,
+            superseded_by: None,
+        };
+
+        tokens.insert(token_id.clone(), entry);
+        families
+            .entry(family_id)
+            .or_default()
+            .push(token_id.clone());
+        order.push_back(token_id);
+    }
+
+    /// validate a refresh token, checking for expiry and reuse
+    pub async fn validate(&self, token_id: &str) -> RefreshTokenValidation {
+        let tokens = self.tokens.read().await;
+        let now = std::time::Instant::now();
+
+        let entry = match tokens.get(token_id) {
+            Some(e) => e.clone(),
+            None => return RefreshTokenValidation::NotFound,
+        };
+
+        // check if expired
+        if now > entry.expires_at {
+            return RefreshTokenValidation::Expired;
+        }
+
+        // check if this token was already rotated
+        if let Some(rotated_at) = entry.rotated_at {
+            let elapsed = now.duration_since(rotated_at).as_secs();
+
+            if elapsed <= ROTATION_GRACE_PERIOD_SECS {
+                // within grace period - allow the request but return the new token
+                if let Some(new_token_id) = &entry.superseded_by {
+                    return RefreshTokenValidation::GracePeriod {
+                        new_token_id: new_token_id.clone(),
+                        entry,
+                    };
+                }
+            }
+
+            // outside grace period - this is reuse
+            return RefreshTokenValidation::Reused {
+                family_id: entry.family_id.clone(),
+            };
+        }
+
+        RefreshTokenValidation::Valid(entry)
+    }
+
+    /// rotate a refresh token: mark old as used, return info for creating new one
+    /// returns the family_id and client_id for the new token
+    pub async fn rotate(&self, old_token_id: &str, new_token_id: &str) -> Option<(String, String)> {
+        let mut tokens = self.tokens.write().await;
+        let mut families = self.families.write().await;
+        let mut order = self.insertion_order.write().await;
+
+        let entry = tokens.get_mut(old_token_id)?;
+
+        // mark as rotated
+        entry.rotated_at = Some(std::time::Instant::now());
+        entry.superseded_by = Some(new_token_id.to_string());
+
+        let family_id = entry.family_id.clone();
+        let client_id = entry.client_id.clone();
+
+        // add new token to family
+        families
+            .entry(family_id.clone())
+            .or_default()
+            .push(new_token_id.to_string());
+        order.push_back(new_token_id.to_string());
+
+        Some((family_id, client_id))
+    }
+
+    /// invalidate all tokens in a family (used when reuse is detected with strict mode)
+    pub async fn invalidate_family(&self, family_id: &str) {
+        let mut tokens = self.tokens.write().await;
+        let mut families = self.families.write().await;
+        let mut order = self.insertion_order.write().await;
+
+        if let Some(token_ids) = families.remove(family_id) {
+            for token_id in &token_ids {
+                tokens.remove(token_id);
+            }
+            order.retain(|id| !token_ids.contains(id));
+
+            tracing::warn!(
+                "invalidated {} tokens in family {} due to reuse detection",
+                token_ids.len(),
+                family_id
+            );
+        }
+    }
+
+    /// clean up expired tokens
+    pub async fn cleanup_expired(&self) {
+        let mut tokens = self.tokens.write().await;
+        let mut families = self.families.write().await;
+        let mut order = self.insertion_order.write().await;
+        let now = std::time::Instant::now();
+
+        // collect expired token ids
+        let expired: Vec<String> = tokens
+            .iter()
+            .filter(|(_, entry)| now > entry.expires_at)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        // remove expired entries
+        for token_id in &expired {
+            if let Some(entry) = tokens.remove(token_id) {
+                // also remove from family tracking
+                if let Some(family) = families.get_mut(&entry.family_id) {
+                    family.retain(|id| id != token_id);
+                    if family.is_empty() {
+                        families.remove(&entry.family_id);
+                    }
+                }
+            }
+        }
+
+        // clean up insertion order
+        order.retain(|id| !expired.contains(id));
+
+        if !expired.is_empty() {
+            tracing::debug!("cleaned up {} expired refresh tokens", expired.len());
+        }
+    }
+
+    /// get current count of refresh tokens (for monitoring)
+    #[allow(dead_code)]
+    pub async fn len(&self) -> usize {
+        self.tokens.read().await.len()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AuthorizationRequest {
     pub client_id: String,

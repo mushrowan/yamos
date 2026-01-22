@@ -6,7 +6,8 @@ mod token;
 mod traits;
 
 pub use authorization_code::{
-    AuthorizationStore, ClientRegistry, authorize_approval_handler, authorize_handler,
+    AuthorizationStore, ClientRegistry, RefreshTokenStore, authorize_approval_handler,
+    authorize_handler,
 };
 pub use client_credentials::StaticClientValidator;
 pub use handlers::{
@@ -30,6 +31,10 @@ pub struct AuthConfig {
     pub client_id: String,
     pub client_secret: String,
     pub token_expiration: Option<Duration>,
+    /// How long refresh tokens are valid for (default 30 days)
+    pub refresh_token_expiration: Duration,
+    /// If true, invalidate token family on reuse; if false, just log warning
+    pub strict_rotation: bool,
 }
 
 /// Complete OAuth service that combines validation, issuing, and verification
@@ -38,6 +43,8 @@ pub struct OAuthService {
     credential_validator: Arc<dyn CredentialValidator + Send + Sync>,
     token_issuer: Arc<dyn TokenIssuer + Send + Sync>,
     token_validator: Arc<dyn TokenValidator + Send + Sync>,
+    refresh_token_expiration: Duration,
+    strict_rotation: bool,
 }
 
 impl OAuthService {
@@ -58,7 +65,19 @@ impl OAuthService {
             credential_validator,
             token_issuer,
             token_validator,
+            refresh_token_expiration: config.refresh_token_expiration,
+            strict_rotation: config.strict_rotation,
         }
+    }
+
+    /// Get the configured refresh token expiration duration
+    pub fn refresh_token_expiration(&self) -> Duration {
+        self.refresh_token_expiration
+    }
+
+    /// Check if strict rotation mode is enabled
+    pub fn strict_rotation(&self) -> bool {
+        self.strict_rotation
     }
 
     // Delegate methods for easy access

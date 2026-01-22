@@ -144,7 +144,19 @@
                   OAUTH_TOKEN_EXPIRATION = mkOption {
                     type = types.int;
                     default = 3600;
-                    description = "OAuth token expiration in seconds (0 = no expiration).";
+                    description = "OAuth access token expiration in seconds (0 = no expiration).";
+                  };
+
+                  OAUTH_REFRESH_TOKEN_EXPIRATION = mkOption {
+                    type = types.int;
+                    default = 2592000;
+                    description = "OAuth refresh token expiration in seconds (default 30 days).";
+                  };
+
+                  OAUTH_STRICT_ROTATION = mkOption {
+                    type = types.bool;
+                    default = false;
+                    description = "If true, invalidate token family on refresh token reuse. If false, just log a warning.";
                   };
 
                   RUST_LOG = mkOption {

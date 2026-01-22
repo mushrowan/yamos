@@ -45,6 +45,7 @@ impl TokenIssuer for JwtTokenIssuer {
             access_token: token,
             token_type: TokenType::Bearer,
             expires_in: duration.map(|d| d.as_secs()),
+            refresh_token: None, // set by handlers after storing in RefreshTokenStore
         })
     }
 }

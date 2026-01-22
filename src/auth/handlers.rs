@@ -1,5 +1,7 @@
 use super::OAuthService;
-use super::authorization_code::{AuthorizationStore, ClientRegistry, verify_pkce};
+use super::authorization_code::{
+    AuthorizationStore, ClientRegistry, RefreshTokenStore, RefreshTokenValidation, verify_pkce,
+};
 use super::traits::GrantType;
 use axum::{
     Form,
@@ -9,21 +11,23 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Combined OAuth state for all handlers
 #[derive(Clone)]
 pub struct OAuthAppState {
     pub oauth_service: Arc<OAuthService>,
     pub auth_store: Arc<AuthorizationStore>,
+    pub refresh_token_store: Arc<RefreshTokenStore>,
     pub client_registry: Arc<ClientRegistry>,
     pub base_url: String,
 }
 
-/// OAuth 2.0 token request (supports both grant types)
+/// OAuth 2.0 token request (supports all grant types)
 #[derive(Debug, Deserialize)]
 pub struct TokenRequest {
     pub grant_type: GrantType,
-    /// Client ID (required for both grant types)
+    /// Client ID (required for client_credentials, optional for others)
     pub client_id: Option<String>,
     /// Client secret (required for client_credentials, optional for authorization_code with PKCE)
     pub client_secret: Option<String>,
@@ -33,6 +37,8 @@ pub struct TokenRequest {
     pub code_verifier: Option<String>,
     /// Redirect URI (required for authorization_code grant)
     pub redirect_uri: Option<String>,
+    /// Refresh token (required for refresh_token grant)
+    pub refresh_token: Option<String>,
 }
 
 /// OAuth 2.0 error response
@@ -52,6 +58,7 @@ pub async fn oauth_token_handler(
     match req.grant_type {
         GrantType::AuthorizationCode => handle_authorization_code_grant(&state, &req).await,
         GrantType::ClientCredentials => handle_client_credentials_grant(&state, &req).await,
+        GrantType::RefreshToken => handle_refresh_token_grant(&state, &req).await,
         GrantType::Unsupported => error_response(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
@@ -136,24 +143,43 @@ async fn handle_authorization_code_grant(state: &OAuthAppState, req: &TokenReque
         );
     }
 
-    // Issue token
-    match state.oauth_service.issue_token(&pending.client_id) {
-        Ok(token_response) => {
-            tracing::info!(
-                "Issued OAuth token via authorization_code for client: {}",
-                pending.client_id
-            );
-            (StatusCode::OK, Json(token_response)).into_response()
-        }
+    // Issue access token
+    let mut token_response = match state.oauth_service.issue_token(&pending.client_id) {
+        Ok(resp) => resp,
         Err(e) => {
             tracing::error!("Failed to issue token: {}", e);
-            error_response(
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
                 Some("Failed to issue token"),
-            )
+            );
         }
-    }
+    };
+
+    // Issue refresh token
+    let refresh_token_id = Uuid::new_v4().to_string();
+    let family_id = Uuid::new_v4().to_string();
+    let refresh_expiration = state.oauth_service.refresh_token_expiration();
+
+    state
+        .refresh_token_store
+        .store(
+            refresh_token_id.clone(),
+            family_id.clone(),
+            pending.client_id.clone(),
+            refresh_expiration,
+        )
+        .await;
+
+    token_response.refresh_token = Some(refresh_token_id);
+
+    tracing::info!(
+        "Issued OAuth token via authorization_code for client: {} (family: {})",
+        pending.client_id,
+        family_id
+    );
+
+    (StatusCode::OK, Json(token_response)).into_response()
 }
 
 async fn handle_client_credentials_grant(state: &OAuthAppState, req: &TokenRequest) -> Response {
@@ -180,40 +206,200 @@ async fn handle_client_credentials_grant(state: &OAuthAppState, req: &TokenReque
     };
 
     // Validate client credentials
-    match state
+    let client_info = match state
         .oauth_service
         .validate_credentials(client_id, client_secret)
         .await
     {
-        Ok(client_info) => {
-            // Issue token
-            match state.oauth_service.issue_token(&client_info.client_id) {
-                Ok(token_response) => {
-                    tracing::info!(
-                        "Issued OAuth token via client_credentials for client: {}",
-                        client_info.client_id
-                    );
-                    (StatusCode::OK, Json(token_response)).into_response()
-                }
-                Err(e) => {
-                    tracing::error!("Failed to issue token: {}", e);
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "server_error",
-                        Some("Failed to issue token"),
-                    )
-                }
-            }
-        }
+        Ok(info) => info,
         Err(_) => {
             // Don't leak information about why validation failed
-            error_response(
+            return error_response(
                 StatusCode::UNAUTHORIZED,
                 "invalid_client",
                 Some("Client authentication failed"),
-            )
+            );
         }
-    }
+    };
+
+    // Issue access token
+    let mut token_response = match state.oauth_service.issue_token(&client_info.client_id) {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("Failed to issue token: {}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                Some("Failed to issue token"),
+            );
+        }
+    };
+
+    // Issue refresh token
+    let refresh_token_id = Uuid::new_v4().to_string();
+    let family_id = Uuid::new_v4().to_string();
+    let refresh_expiration = state.oauth_service.refresh_token_expiration();
+
+    state
+        .refresh_token_store
+        .store(
+            refresh_token_id.clone(),
+            family_id.clone(),
+            client_info.client_id.clone(),
+            refresh_expiration,
+        )
+        .await;
+
+    token_response.refresh_token = Some(refresh_token_id);
+
+    tracing::info!(
+        "Issued OAuth token via client_credentials for client: {} (family: {})",
+        client_info.client_id,
+        family_id
+    );
+
+    (StatusCode::OK, Json(token_response)).into_response()
+}
+
+async fn handle_refresh_token_grant(state: &OAuthAppState, req: &TokenRequest) -> Response {
+    // clean up expired tokens periodically
+    state.refresh_token_store.cleanup_expired().await;
+
+    let refresh_token = match &req.refresh_token {
+        Some(t) => t,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                Some("Missing required parameter: refresh_token"),
+            );
+        }
+    };
+
+    // Validate the refresh token
+    let (client_id, family_id) = match state.refresh_token_store.validate(refresh_token).await {
+        RefreshTokenValidation::Valid(entry) => (entry.client_id, entry.family_id),
+
+        RefreshTokenValidation::GracePeriod {
+            new_token_id,
+            entry,
+        } => {
+            // Token was already rotated but we're within grace period
+            // Return the new token that was issued
+            tracing::debug!(
+                "Refresh token used within grace period, returning previously issued token for family {}",
+                entry.family_id
+            );
+
+            // Issue a fresh access token for the same client
+            let mut token_response = match state.oauth_service.issue_token(&entry.client_id) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::error!("Failed to issue token: {}", e);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        Some("Failed to issue token"),
+                    );
+                }
+            };
+
+            // Return the new refresh token that was already created
+            token_response.refresh_token = Some(new_token_id);
+
+            tracing::info!(
+                "Issued OAuth token via refresh_token (grace period) for client: {}",
+                entry.client_id
+            );
+
+            return (StatusCode::OK, Json(token_response)).into_response();
+        }
+
+        RefreshTokenValidation::Reused { family_id } => {
+            tracing::warn!(
+                "Refresh token reuse detected for family {}! Potential token theft.",
+                family_id
+            );
+
+            // If strict rotation is enabled, invalidate the entire token family
+            if state.oauth_service.strict_rotation() {
+                state
+                    .refresh_token_store
+                    .invalidate_family(&family_id)
+                    .await;
+                tracing::warn!(
+                    "Strict rotation enabled: invalidated all tokens in family {}",
+                    family_id
+                );
+            }
+
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                Some("Refresh token has already been used"),
+            );
+        }
+
+        RefreshTokenValidation::NotFound => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                Some("Invalid refresh token"),
+            );
+        }
+
+        RefreshTokenValidation::Expired => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                Some("Refresh token has expired"),
+            );
+        }
+    };
+
+    // Generate new refresh token (rotation)
+    let new_refresh_token_id = Uuid::new_v4().to_string();
+    let refresh_expiration = state.oauth_service.refresh_token_expiration();
+
+    // Rotate: mark old token as used, create new one in same family
+    state
+        .refresh_token_store
+        .rotate(refresh_token, &new_refresh_token_id)
+        .await;
+
+    // Store the new refresh token
+    state
+        .refresh_token_store
+        .store(
+            new_refresh_token_id.clone(),
+            family_id.clone(),
+            client_id.clone(),
+            refresh_expiration,
+        )
+        .await;
+
+    // Issue new access token
+    let mut token_response = match state.oauth_service.issue_token(&client_id) {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("Failed to issue token: {}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                Some("Failed to issue token"),
+            );
+        }
+    };
+
+    token_response.refresh_token = Some(new_refresh_token_id);
+
+    tracing::info!(
+        "Issued OAuth token via refresh_token for client: {} (family: {})",
+        client_id,
+        family_id
+    );
+
+    (StatusCode::OK, Json(token_response)).into_response()
 }
 
 fn error_response(status: StatusCode, error: &str, description: Option<&str>) -> Response {
@@ -256,14 +442,17 @@ pub struct AuthorizationServerMetadata {
 /// Tells clients what auth methods we support
 pub async fn metadata_handler(State(state): State<OAuthAppState>) -> Response {
     let base_url = &state.base_url;
-    // advertise authorization_code with PKCE (public clients)
+    // advertise authorization_code with PKCE (public clients) and refresh_token
     // client_credentials is still supported but not advertised to avoid confusion
     let metadata = AuthorizationServerMetadata {
         issuer: base_url.clone(),
         authorization_endpoint: Some(format!("{}/authorize", base_url)),
         token_endpoint: format!("{}/token", base_url),
         registration_endpoint: Some(format!("{}/register", base_url)),
-        grant_types_supported: vec!["authorization_code".to_string()],
+        grant_types_supported: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
         token_endpoint_auth_methods_supported: vec!["none".to_string()],
         response_types_supported: vec!["code".to_string()],
         code_challenge_methods_supported: Some(vec!["S256".to_string()]),
@@ -309,7 +498,6 @@ pub async fn register_handler(
     );
 
     // Generate new client credentials
-    use uuid::Uuid;
     let client_id = format!("mcp-client-{}", Uuid::new_v4());
     // For public clients using authorization_code with PKCE, secret is optional
     // but we generate one anyway for flexibility

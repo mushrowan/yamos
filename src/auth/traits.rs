@@ -10,7 +10,8 @@ use std::time::Duration;
 pub enum GrantType {
     AuthorizationCode,
     ClientCredentials,
-    /// catch-all for grant types we don't support (e.g., refresh_token)
+    RefreshToken,
+    /// catch-all for grant types we don't support
     /// Allows client registration to succeed even if client requests unsupported grants
     #[serde(other, skip_serializing)]
     Unsupported,
@@ -21,6 +22,7 @@ impl fmt::Display for GrantType {
         match self {
             GrantType::AuthorizationCode => write!(f, "authorization_code"),
             GrantType::ClientCredentials => write!(f, "client_credentials"),
+            GrantType::RefreshToken => write!(f, "refresh_token"),
             GrantType::Unsupported => write!(f, "unsupported"),
         }
     }
@@ -101,6 +103,8 @@ pub struct TokenResponse {
     pub token_type: TokenType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>, // seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -62,17 +62,36 @@ variables (i just stick everything in a `.env` file personally):
 
 ### oauth-specific options
 
-| cli flag                   | env variable             | what it does                        | default value        |
-| -------------------------- | ------------------------ | ----------------------------------- | -------------------- |
-| `--oauth-enabled`          | `OAUTH_ENABLED`          | enable oauth 2.0 authentication     | `false`              |
-| `--oauth-jwt-secret`       | `OAUTH_JWT_SECRET`       | jwt signing secret                  | required if oauth on |
-| `--oauth-client-id`        | `OAUTH_CLIENT_ID`        | oauth client id                     | required if oauth on |
-| `--oauth-client-secret`    | `OAUTH_CLIENT_SECRET`    | oauth client secret                 | required if oauth on |
-| `--oauth-token-expiration` | `OAUTH_TOKEN_EXPIRATION` | token lifetime in seconds (0=never) | `3600`               |
-| `--auth-token`             | `MCP_AUTH_TOKEN`         | legacy static bearer token          | none                 |
+| cli flag                            | env variable                      | what it does                                       | default value        |
+| ----------------------------------- | --------------------------------- | -------------------------------------------------- | -------------------- |
+| `--oauth-enabled`                   | `OAUTH_ENABLED`                   | enable oauth 2.0 authentication                    | `false`              |
+| `--oauth-jwt-secret`                | `OAUTH_JWT_SECRET`                | jwt signing secret                                 | required if oauth on |
+| `--oauth-client-id`                 | `OAUTH_CLIENT_ID`                 | oauth client id                                    | required if oauth on |
+| `--oauth-client-secret`             | `OAUTH_CLIENT_SECRET`             | oauth client secret                                | required if oauth on |
+| `--oauth-token-expiration`          | `OAUTH_TOKEN_EXPIRATION`          | access token lifetime in seconds (0=never)         | `3600` (1 hour)      |
+| `--oauth-refresh-token-expiration`  | `OAUTH_REFRESH_TOKEN_EXPIRATION`  | refresh token lifetime in seconds                  | `2592000` (30 days)  |
+| `--oauth-strict-rotation`           | `OAUTH_STRICT_ROTATION`           | invalidate token family on refresh token reuse     | `false`              |
+| `--auth-token`                      | `MCP_AUTH_TOKEN`                  | legacy static bearer token                         | none                 |
 
-_it's probably a bad idea to set the oauth expiration to 0. most good oauth
-clients should grab a new api token automatically when they need one_
+#### refresh tokens
+
+yamos supports oauth refresh tokens with automatic rotation. when you
+authenticate, you get both an access token (short-lived, default 1 hour) and a
+refresh token (long-lived, default 30 days). when the access token expires,
+clients can use the refresh token to get a new access token without
+re-authenticating.
+
+**token rotation:** each time a refresh token is used, a new refresh token is
+issued and the old one is invalidated. this limits the damage if a refresh token
+is stolen.
+
+**reuse detection:** if someone tries to use an old refresh token after it's
+been rotated, yamos detects this as potential token theft. by default, it logs a
+warning and rejects the request. if `OAUTH_STRICT_ROTATION=true`, it also
+invalidates all tokens in that session, forcing re-authentication.
+
+**grace period:** there's a 30-second grace period after rotation where the old
+token still works. this handles race conditions if a network request retries.
 
 ## authentication
 
@@ -102,7 +121,8 @@ OAUTH_ENABLED=true
 OAUTH_JWT_SECRET=your-generated-jwt-secret
 OAUTH_CLIENT_ID=mcp-client # not particularly important, set it to whatever
 OAUTH_CLIENT_SECRET=your-generated-client-secret
-OAUTH_TOKEN_EXPIRATION=3600  # 1 hour, or 0 for no expiration
+OAUTH_TOKEN_EXPIRATION=3600  # 1 hour access token
+OAUTH_REFRESH_TOKEN_EXPIRATION=2592000  # 30 days refresh token
 ```
 
 see `.env.example` for a more comprehensive example
